@@ -1,0 +1,9 @@
+bin/
+obj/
+build/
+target/
+*.log
+.vs/
+.vscode/
+node_modules/
+__pycache__/
