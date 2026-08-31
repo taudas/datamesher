@@ -339,6 +339,12 @@ impl MemoryRegion {
         &self.buf
     }
 
+    /// Writes locally into the buffer before a `post_send` — for the
+    /// two-sided send/receive path.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.buf
+    }
+
     pub fn rkey(&self) -> u32 {
         unsafe { (*self.mr).rkey }
     }

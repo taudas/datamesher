@@ -28,4 +28,4 @@ Rust workspace, RDMA via `rdma-sys` (rdma-core / libibverbs bindings). Linux onl
 
 ## Status
 
-Early scaffold. Both sides open a device, bring up an RC queue pair + memory region, exchange connection info over TCP, and connect the queue pair to RTS — then park. No SSI exposure yet, no workload offload hook. Unverified against a real build — no Rust/Linux/libibverbs in the environment this was written in.
+Early scaffold. Both sides open a device, bring up an RC queue pair + memory region, exchange connection info over TCP, and connect the queue pair to RTS. Consumer sends a heartbeat, producer receives and logs it — real two-sided traffic over the RDMA QP. No SSI exposure yet, no offload path, no request/response protocol. Unverified against a real build — no Rust/Linux/libibverbs in the environment this was written in.

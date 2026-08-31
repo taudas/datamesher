@@ -65,7 +65,9 @@ fn main() -> std::io::Result<()> {
                 eprintln!("dtmshr-producer: work completion failed, status={}", wc.status);
                 continue;
             }
-            let msg = String::from_utf8_lossy(&recv_mr.as_slice()[..wc.byte_len as usize]);
+            let raw = &recv_mr.as_slice()[..wc.byte_len as usize];
+            let msg = String::from_utf8_lossy(raw);
+            let msg = msg.trim_end_matches('\0');
             eprintln!("dtmshr-producer: received {} bytes: {msg:?}", wc.byte_len);
 
             qp.post_recv(&recv_mr, next_wr_id)?;
