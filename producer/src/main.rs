@@ -1,87 +1,31 @@
-use std::ffi::CStr;
-use std::io;
-use std::ptr;
+use dtmshr_rdma::{MemoryRegion, QueuePair, RdmaEndpoint};
 
-use rdma_sys::*;
+const CQ_DEPTH: i32 = 16;
+const QP_DEPTH: u32 = 16;
 
-/// A DTMSHR producer node: one RDMA device opened, with a protection domain
-/// and completion queue ready for queue pairs to be built on top of.
-struct DtmshrNode {
-    device_list: *mut *mut ibv_device,
-    context: *mut ibv_context,
-    pd: *mut ibv_pd,
-    cq: *mut ibv_cq,
-}
+/// Placeholder for the memory this producer exposes as its SSI compute
+/// surface. Real sizing/lifetime TBD once the SSI model is decided.
+const SSI_BUFFER_LEN: usize = 4096;
 
-impl DtmshrNode {
-    /// Opens the first available RDMA device on this host and brings up
-    /// the minimal state (protection domain, completion queue) a producer
-    /// needs before it can accept queue pairs from consumers.
-    fn open_first_device() -> io::Result<Self> {
-        unsafe {
-            let mut num_devices: i32 = 0;
-            let device_list = ibv_get_device_list(&mut num_devices);
-            if device_list.is_null() || num_devices == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "no RDMA devices found (is rdma-core installed and a device present?)",
-                ));
-            }
+fn main() -> std::io::Result<()> {
+    let endpoint = RdmaEndpoint::open_first_device(CQ_DEPTH)?;
+    let qp = QueuePair::create_rc(&endpoint, QP_DEPTH, QP_DEPTH)?;
 
-            let device = *device_list;
-            let name = CStr::from_ptr(ibv_get_device_name(device))
-                .to_string_lossy()
-                .into_owned();
-            eprintln!("dtmshr-producer: opening device {name}");
+    let mut ssi_buffer = vec![0u8; SSI_BUFFER_LEN];
+    let mr = MemoryRegion::register(&endpoint, &mut ssi_buffer)?;
 
-            let context = ibv_open_device(device);
-            if context.is_null() {
-                ibv_free_device_list(device_list);
-                return Err(io::Error::last_os_error());
-            }
+    eprintln!(
+        "dtmshr-producer: qp_num={} rkey={} up, waiting for consumer connection info (not implemented yet)",
+        qp.qp_num(),
+        mr.rkey(),
+    );
 
-            let pd = ibv_alloc_pd(context);
-            if pd.is_null() {
-                let err = io::Error::last_os_error();
-                ibv_close_device(context);
-                ibv_free_device_list(device_list);
-                return Err(err);
-            }
+    // TODO: listen for a consumer's out-of-band connection request (qp_num,
+    // psn, lid/gid, rkey), exchange this node's own, then modify_qp through
+    // RTR -> RTS to actually connect.
 
-            const CQ_DEPTH: i32 = 16;
-            let cq = ibv_create_cq(context, CQ_DEPTH, ptr::null_mut(), ptr::null_mut(), 0);
-            if cq.is_null() {
-                let err = io::Error::last_os_error();
-                ibv_dealloc_pd(pd);
-                ibv_close_device(context);
-                ibv_free_device_list(device_list);
-                return Err(err);
-            }
-
-            Ok(Self {
-                device_list,
-                context,
-                pd,
-                cq,
-            })
-        }
-    }
-}
-
-impl Drop for DtmshrNode {
-    fn drop(&mut self) {
-        unsafe {
-            ibv_destroy_cq(self.cq);
-            ibv_dealloc_pd(self.pd);
-            ibv_close_device(self.context);
-            ibv_free_device_list(self.device_list);
-        }
-    }
-}
-
-fn main() -> io::Result<()> {
-    let node = DtmshrNode::open_first_device()?;
-    eprintln!("dtmshr-producer: node up, protection domain and completion queue ready");
-    drop(node);
+    drop(mr);
+    drop(qp);
+    drop(endpoint);
     Ok(())
 }
