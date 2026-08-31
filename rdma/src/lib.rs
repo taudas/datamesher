@@ -90,6 +90,38 @@ impl RdmaEndpoint {
             Ok(gid.raw)
         }
     }
+
+    /// Drains up to `max` completions from this endpoint's completion queue.
+    /// Non-blocking — returns an empty `Vec` if nothing's ready yet.
+    pub fn poll_cq(&self, max: usize) -> io::Result<Vec<WorkCompletion>> {
+        unsafe {
+            let mut wc_buf: Vec<ibv_wc> = vec![std::mem::zeroed(); max];
+            let n = ibv_poll_cq(self.cq, max as i32, wc_buf.as_mut_ptr());
+            if n < 0 {
+                return Err(io::Error::new(io::ErrorKind::Other, "ibv_poll_cq failed"));
+            }
+            Ok(wc_buf[..n as usize]
+                .iter()
+                .map(|wc| WorkCompletion {
+                    wr_id: wc.wr_id,
+                    status: wc.status as u32,
+                    opcode: wc.opcode as u32,
+                    byte_len: wc.byte_len,
+                })
+                .collect())
+        }
+    }
+}
+
+/// A completed send/receive work request, as reported by `poll_cq`.
+/// `status` is `IBV_WC_SUCCESS` (0) on success — anything else is a
+/// transport-level failure worth logging, not silently ignoring.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkCompletion {
+    pub wr_id: u64,
+    pub status: u32,
+    pub opcode: u32,
+    pub byte_len: u32,
 }
 
 impl Drop for RdmaEndpoint {
@@ -206,6 +238,55 @@ impl QueuePair {
             Ok(())
         }
     }
+
+    /// Posts the whole memory region as one receive buffer, tagged with
+    /// `wr_id` so the matching completion (from `RdmaEndpoint::poll_cq`)
+    /// can be matched back to it.
+    pub fn post_recv(&self, mr: &MemoryRegion, wr_id: u64) -> io::Result<()> {
+        unsafe {
+            let mut sge = ibv_sge {
+                addr: mr.addr(),
+                length: mr.len() as u32,
+                lkey: mr.lkey(),
+            };
+            let mut wr: ibv_recv_wr = std::mem::zeroed();
+            wr.wr_id = wr_id;
+            wr.sg_list = &mut sge;
+            wr.num_sge = 1;
+
+            let mut bad_wr: *mut ibv_recv_wr = ptr::null_mut();
+            let ret = ibv_post_recv(self.qp, &mut wr, &mut bad_wr);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+            Ok(())
+        }
+    }
+
+    /// Sends the whole memory region as one message (two-sided send —
+    /// the peer must have a matching `post_recv` outstanding).
+    pub fn post_send(&self, mr: &MemoryRegion, wr_id: u64) -> io::Result<()> {
+        unsafe {
+            let mut sge = ibv_sge {
+                addr: mr.addr(),
+                length: mr.len() as u32,
+                lkey: mr.lkey(),
+            };
+            let mut wr: ibv_send_wr = std::mem::zeroed();
+            wr.wr_id = wr_id;
+            wr.sg_list = &mut sge;
+            wr.num_sge = 1;
+            wr.opcode = IBV_WR_SEND;
+            wr.send_flags = IBV_SEND_SIGNALED;
+
+            let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
+            let ret = ibv_post_send(self.qp, &mut wr, &mut bad_wr);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+            Ok(())
+        }
+    }
 }
 
 impl Drop for QueuePair {
@@ -249,6 +330,13 @@ impl MemoryRegion {
 
     pub fn len(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Reads the buffer's current contents locally — for the two-sided
+    /// send/receive path, where the local side needs to see what a
+    /// `post_recv` just filled in.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf
     }
 
     pub fn rkey(&self) -> u32 {

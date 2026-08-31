@@ -40,7 +40,7 @@ Both `producer` and `consumer`:
 5. Exchange `ConnectionInfo` (qp_num, psn, GID, rkey, addr) over a plain TCP handshake — producer listens (`net::accept_and_exchange`), consumer dials in (`net::connect_and_exchange`).
 6. Drive the queue pair through `RTR` to `RTS` using the peer's info (`QueuePair::connect`), addressed by GID (RoCE has no LID).
 
-At that point both sides have a connected RC queue pair and each other's rkey/addr — but nothing sends or receives yet. Both binaries just park after connecting.
+At that point both sides have a connected RC queue pair and each other's rkey/addr. The producer then posts a receive buffer and polls its completion queue in a loop, logging whatever two-sided sends land on it (`QueuePair::post_recv`/`post_send`, `RdmaEndpoint::poll_cq`) — a control channel proving the QP carries real traffic, not yet a request/response protocol. The consumer still just parks after connecting; it doesn't send anything yet.
 
 ## Open design questions
 
