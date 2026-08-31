@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["rdma", "producer", "consumer"]
+
+# rdma-sys 0.3.0 pins bindgen ^0.59.2, which chokes on the anonymous-union
+# naming in newer rdma-core headers (Ubuntu 24.04's ib_user_ioctl_verbs.h).
+# Vendored copy bumps that one dependency version; see vendor/rdma-sys/README.md.
+[patch.crates-io]
+rdma-sys = { path = "vendor/rdma-sys" }

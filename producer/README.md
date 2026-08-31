@@ -21,8 +21,8 @@ cargo build -p dtmshr-producer
 cargo run -p dtmshr-producer -- 0.0.0.0:7471   # bind addr, defaults to 0.0.0.0:7471
 ```
 
-Won't build on plain Windows — no libibverbs there. Use WSL2 with an RDMA-capable NIC, or a Linux box/VM.
+Compiles clean on WSL2 Ubuntu 24.04 + rdma-core 61.0. Not yet run against a real device — no RDMA hardware or working soft-RoCE in that environment (see [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)).
 
-**Unverified**: written and reviewed by hand, not yet compiled — this environment has no Rust toolchain and no Linux/libibverbs. First `cargo build` on a real Linux box will likely need small fixes to match whatever `rdma-sys`'s bindgen output actually named things.
+Won't build on plain Windows — no libibverbs there. Use WSL2 with an RDMA-capable NIC, or a Linux box/VM.
 
 TODO: SSI compute exposure, resource limits tied to available power headroom.

@@ -2,6 +2,10 @@
 
 Most devs won't have real RDMA-capable NICs (RoCE/InfiniBand hardware) lying around. This sets up a working RDMA device on plain Ethernet using **soft-RoCE** (the `rxe` kernel module), plus notes for WSL2 on Windows.
 
+**Building** the workspace and **running** it against a real QP are separate concerns. `cargo build --workspace` only needs `libibverbs-dev`/`librdmacm-dev` (headers + the .so to link against) — confirmed working on stock WSL2 Ubuntu 24.04, no RDMA device required. `modinfo rdma_rxe` on that same stock WSL2 kernel (6.18, microsoft-standard-WSL2) comes back "module not found" — confirming Option B needs the custom-kernel or VM path below before anything can actually connect a queue pair.
+
+One more thing already handled for you: `rdma-sys` 0.3.0 pins a `bindgen` version too old to parse Ubuntu 24.04's rdma-core 61.0 headers (it panics on an anonymous-union name). The workspace patches around it — see [`../vendor/rdma-sys`](../vendor/rdma-sys) — so `cargo build` just works; no action needed unless that patch ever needs revisiting.
+
 ## Option A: native Linux with soft-RoCE
 
 ```bash

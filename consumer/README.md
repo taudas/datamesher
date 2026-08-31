@@ -21,6 +21,6 @@ cargo build -p dtmshr-consumer
 cargo run -p dtmshr-consumer -- <producer-host>:7471
 ```
 
-**Unverified**: not yet compiled — this environment has no Rust toolchain and no Linux/libibverbs.
+Compiles clean on WSL2 Ubuntu 24.04 + rdma-core 61.0. Not yet run against a real device — no RDMA hardware or working soft-RoCE in that environment (see [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md)).
 
 TODO: producer discovery/selection, workload interception/offload API.

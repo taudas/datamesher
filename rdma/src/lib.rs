@@ -1,10 +1,16 @@
 //! Shared RDMA bring-up for DTMSHR nodes (producer and consumer sides).
 //!
 //! Thin safe-ish wrappers over `rdma-sys` (rdma-core/libibverbs FFI).
-//! Unverified against a real build: this environment has no Rust toolchain
-//! and no Linux/libibverbs to compile against. Treat as a first pass —
-//! run `cargo build` on a Linux box with rdma-core installed and fix up
-//! whatever bindgen actually named things before relying on it.
+//! Compiles clean on WSL2 Ubuntu (rdma-core 61.0, vendored `rdma-sys` with a
+//! bumped `bindgen` — see `../vendor/rdma-sys/README.md`); not yet run
+//! against a real or soft-RoCE device.
+//!
+//! Enum-typed struct fields (`qp_state`, `qp_type`, `path_mtu`, ...) use
+//! bindgen's `constified_enum_module` output, so constants are qualified by
+//! module: `ibv_qp_state::IBV_QPS_INIT`, not a bare `IBV_QPS_INIT`. Flag
+//! fields (`ibv_access_flags`, `ibv_qp_attr_mask`, `ibv_send_flags`) are
+//! bindgen's `bitfield_enum` newtypes — combine with `|` on the values
+//! themselves, or OR the raw `.0` fields for a `const`.
 
 use std::ffi::CStr;
 use std::io;
@@ -95,7 +101,12 @@ impl RdmaEndpoint {
     /// Non-blocking — returns an empty `Vec` if nothing's ready yet.
     pub fn poll_cq(&self, max: usize) -> io::Result<Vec<WorkCompletion>> {
         unsafe {
-            let mut wc_buf: Vec<ibv_wc> = vec![std::mem::zeroed(); max];
+            // ibv_wc isn't Clone/Copy (rdma-sys defines it by hand, see
+            // vendor/rdma-sys/src/types.rs), so `vec![zeroed(); max]` won't
+            // work. set_len is fine here: ibv_poll_cq fills entries [0, n),
+            // and we only ever read that prefix back out.
+            let mut wc_buf: Vec<ibv_wc> = Vec::with_capacity(max);
+            wc_buf.set_len(max);
             let n = ibv_poll_cq(self.cq, max as i32, wc_buf.as_mut_ptr());
             if n < 0 {
                 return Err(io::Error::new(io::ErrorKind::Other, "ibv_poll_cq failed"));
@@ -104,8 +115,8 @@ impl RdmaEndpoint {
                 .iter()
                 .map(|wc| WorkCompletion {
                     wr_id: wc.wr_id,
-                    status: wc.status as u32,
-                    opcode: wc.opcode as u32,
+                    status: wc.status,
+                    opcode: wc.opcode,
                     byte_len: wc.byte_len,
                 })
                 .collect())
@@ -135,8 +146,11 @@ impl Drop for RdmaEndpoint {
     }
 }
 
-const QP_ACCESS_FLAGS: u32 =
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+// `ibv_access_flags` is a bindgen bitfield_enum newtype (`ibv_access_flags(pub
+// c_uint)`); its `|` impl isn't const, so OR the raw `.0` fields instead.
+const QP_ACCESS_FLAGS: u32 = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
+    | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
+    | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
 /// An RC (reliable connected) queue pair, brought up to INIT.
 ///
@@ -153,7 +167,7 @@ impl QueuePair {
             let mut qp_init_attr: ibv_qp_init_attr = std::mem::zeroed();
             qp_init_attr.send_cq = endpoint.cq;
             qp_init_attr.recv_cq = endpoint.cq;
-            qp_init_attr.qp_type = IBV_QPT_RC;
+            qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
             qp_init_attr.cap.max_send_wr = max_send_wr;
             qp_init_attr.cap.max_recv_wr = max_recv_wr;
             qp_init_attr.cap.max_send_sge = 1;
@@ -165,12 +179,15 @@ impl QueuePair {
             }
 
             let mut attr: ibv_qp_attr = std::mem::zeroed();
-            attr.qp_state = IBV_QPS_INIT;
+            attr.qp_state = ibv_qp_state::IBV_QPS_INIT;
             attr.pkey_index = 0;
-            attr.port_num = 1;
+            attr.port_num = PORT_NUM;
             attr.qp_access_flags = QP_ACCESS_FLAGS;
 
-            let mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+            let mask = ibv_qp_attr_mask::IBV_QP_STATE.0
+                | ibv_qp_attr_mask::IBV_QP_PKEY_INDEX.0
+                | ibv_qp_attr_mask::IBV_QP_PORT.0
+                | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS.0;
 
             let ret = ibv_modify_qp(qp, &mut attr, mask as i32);
             if ret != 0 {
@@ -192,8 +209,8 @@ impl QueuePair {
     pub fn connect(&self, local_psn: u32, remote: &ConnectionInfo) -> io::Result<()> {
         unsafe {
             let mut attr: ibv_qp_attr = std::mem::zeroed();
-            attr.qp_state = IBV_QPS_RTR;
-            attr.path_mtu = IBV_MTU_1024;
+            attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
+            attr.path_mtu = ibv_mtu::IBV_MTU_1024;
             attr.dest_qp_num = remote.qp_num;
             attr.rq_psn = remote.psn;
             attr.max_dest_rd_atomic = 1;
@@ -204,32 +221,32 @@ impl QueuePair {
             attr.ah_attr.grh.hop_limit = 1;
             attr.ah_attr.port_num = PORT_NUM;
 
-            let mask = IBV_QP_STATE
-                | IBV_QP_AV
-                | IBV_QP_PATH_MTU
-                | IBV_QP_DEST_QPN
-                | IBV_QP_RQ_PSN
-                | IBV_QP_MAX_DEST_RD_ATOMIC
-                | IBV_QP_MIN_RNR_TIMER;
+            let mask = ibv_qp_attr_mask::IBV_QP_STATE.0
+                | ibv_qp_attr_mask::IBV_QP_AV.0
+                | ibv_qp_attr_mask::IBV_QP_PATH_MTU.0
+                | ibv_qp_attr_mask::IBV_QP_DEST_QPN.0
+                | ibv_qp_attr_mask::IBV_QP_RQ_PSN.0
+                | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC.0
+                | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER.0;
             let ret = ibv_modify_qp(self.qp, &mut attr, mask as i32);
             if ret != 0 {
                 return Err(io::Error::from_raw_os_error(ret));
             }
 
             let mut attr: ibv_qp_attr = std::mem::zeroed();
-            attr.qp_state = IBV_QPS_RTS;
+            attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
             attr.timeout = 14;
             attr.retry_cnt = 7;
             attr.rnr_retry = 7;
             attr.sq_psn = local_psn;
             attr.max_rd_atomic = 1;
 
-            let mask = IBV_QP_STATE
-                | IBV_QP_TIMEOUT
-                | IBV_QP_RETRY_CNT
-                | IBV_QP_RNR_RETRY
-                | IBV_QP_SQ_PSN
-                | IBV_QP_MAX_RD_ATOMIC;
+            let mask = ibv_qp_attr_mask::IBV_QP_STATE.0
+                | ibv_qp_attr_mask::IBV_QP_TIMEOUT.0
+                | ibv_qp_attr_mask::IBV_QP_RETRY_CNT.0
+                | ibv_qp_attr_mask::IBV_QP_RNR_RETRY.0
+                | ibv_qp_attr_mask::IBV_QP_SQ_PSN.0
+                | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC.0;
             let ret = ibv_modify_qp(self.qp, &mut attr, mask as i32);
             if ret != 0 {
                 return Err(io::Error::from_raw_os_error(ret));
@@ -276,8 +293,8 @@ impl QueuePair {
             wr.wr_id = wr_id;
             wr.sg_list = &mut sge;
             wr.num_sge = 1;
-            wr.opcode = IBV_WR_SEND;
-            wr.send_flags = IBV_SEND_SIGNALED;
+            wr.opcode = ibv_wr_opcode::IBV_WR_SEND;
+            wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
 
             let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
             let ret = ibv_post_send(self.qp, &mut wr, &mut bad_wr);

@@ -27,7 +27,7 @@ Rust workspace, three crates:
 - [`producer/`](producer) (`dtmshr-producer`) — DTMSHR node agent.
 - [`consumer/`](consumer) (`dtmshr-consumer`) — offload client.
 
-All RDMA access goes through `rdma-sys` (bindgen bindings over rdma-core / libibverbs). Linux only — see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for environment setup.
+All RDMA access goes through `rdma-sys` (bindgen bindings over rdma-core / libibverbs) — actually [`vendor/rdma-sys`](vendor/rdma-sys), a patched copy (see that dir's README for why). Linux only — see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for environment setup.
 
 ## Current state
 
@@ -40,7 +40,9 @@ Both `producer` and `consumer`:
 5. Exchange `ConnectionInfo` (qp_num, psn, GID, rkey, addr) over a plain TCP handshake — producer listens (`net::accept_and_exchange`), consumer dials in (`net::connect_and_exchange`).
 6. Drive the queue pair through `RTR` to `RTS` using the peer's info (`QueuePair::connect`), addressed by GID (RoCE has no LID).
 
-At that point both sides have a connected RC queue pair and each other's rkey/addr. The producer posts a receive buffer and polls its completion queue in a loop, logging whatever lands on it. The consumer sends a `"ping {n}"` message every 5 seconds (`QueuePair::post_send`) and drains its own completion queue so it doesn't overflow. This proves the QP carries real two-sided traffic end to end — it is a heartbeat, not a request/response protocol, and not the SSI data path (which will likely be one-sided RDMA read/write, not send/receive).
+At that point both sides have a connected RC queue pair and each other's rkey/addr. The producer posts a receive buffer and polls its completion queue in a loop, logging whatever lands on it. The consumer sends a `"ping {n}"` message every 5 seconds (`QueuePair::post_send`) and drains its own completion queue so it doesn't overflow. This is a heartbeat, not a request/response protocol, and not the SSI data path (which will likely be one-sided RDMA read/write, not send/receive).
+
+The whole workspace compiles clean (`cargo build --workspace`) on WSL2 Ubuntu 24.04 with rdma-core 61.0. Not yet run against a real device or soft-RoCE — that WSL2 kernel doesn't ship `rdma_rxe` (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), so everything above is verified at the type/FFI level (every `ibv_*` call, struct field, and constified/bitfield enum reference matches what rdma-core 61.0's headers actually generate), not at the "does a QP actually reach RTS on real hardware" level.
 
 ## Open design questions
 
