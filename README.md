@@ -4,31 +4,27 @@ Distributed compute mesh. Spare CPU cycles from producers, offloaded to consumer
 
 Reference: [Datamesher.ai](http://datamesher.ai)
 
-## Actors
+Two actors:
 
-### Producer
+- **Producer** — spare/excess power capacity ("extra watts"), runs **DTMSHR** to expose a single system image (SSI) compute node over RDMA.
+- **Consumer** — existing machine, existing software, offloads CPU to a producer over RDMA instead of scaling locally.
 
-Runs a dedicated compute node on spare/excess power capacity ("extra watts"). Runs **DTMSHR**, which implements RDMA to expose a single system image (SSI) compute node to consumers.
-
-- Hardware: idle/underutilized machine, power headroom available.
-- Software: `DTMSHR` node agent.
-- Exposes: one RDMA-backed SSI compute endpoint.
-
-### Consumer
-
-Runs existing software on their existing machine, offloading CPU load to a producer instead of scaling locally.
-
-- Hardware/software: unchanged, existing workload.
-- Offload path: existing app -> DTMSHR client -> RDMA -> producer's SSI node.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and current implementation state.
 
 ## Components
 
-Rust workspace, RDMA via `rdma-sys` (rdma-core / libibverbs bindings). Linux only — see each crate's README for build requirements.
+Rust workspace, RDMA via `rdma-sys` (rdma-core / libibverbs bindings). Linux only.
 
-- `rdma/` — shared RDMA bring-up (`dtmshr-rdma`): device open, PD, CQ, RC queue pair, memory region registration.
-- `producer/` — DTMSHR node agent (RDMA server, SSI exposure).
-- `consumer/` — offload client (hooks into existing workloads, routes CPU-bound work to a producer over RDMA).
-- `docs/` — architecture, protocol, and design notes.
+- [`rdma/`](rdma) — shared RDMA bring-up (`dtmshr-rdma`): device open, PD, CQ, RC queue pair, memory region registration.
+- [`producer/`](producer) — DTMSHR node agent (RDMA server, SSI exposure).
+- [`consumer/`](consumer) — offload client (hooks into existing workloads, routes CPU-bound work to a producer over RDMA).
+- [`docs/`](docs) — deeper dev/setup notes.
+
+## Getting started
+
+- New here? Start with [ARCHITECTURE.md](ARCHITECTURE.md).
+- Setting up a dev environment (build deps, soft-RoCE for testing without real RDMA hardware, WSL2 notes)? [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+- Making changes? [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 

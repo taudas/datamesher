@@ -1,0 +1,55 @@
+# Architecture
+
+Datamesher: two actors trading spare CPU over RDMA. Reference: [Datamesher.ai](http://datamesher.ai)
+
+## Actors
+
+**Producer** — has spare/excess power capacity ("extra watts"). Runs a dedicated compute node with **DTMSHR**, which implements RDMA to expose a single system image (SSI) compute node to consumers.
+
+**Consumer** — runs existing software on their existing machine, offloads CPU-bound work to a producer instead of scaling locally. Software stays the same; only where the CPU cycles come from changes.
+
+```
+ consumer host                          producer host
+ +---------------------+                +---------------------+
+ | existing software    |                |                       |
+ |        |             |                |   DTMSHR              |
+ | dtmshr-consumer       | <-- RDMA --> |   (dtmshr-producer)  |
+ | (offload client)      |  RC queue pair |   exposes SSI        |
+ |                       |                |   compute node        |
+ +---------------------+                +---------------------+
+```
+
+## Workspace layout
+
+Rust workspace, three crates:
+
+- [`rdma/`](rdma) (`dtmshr-rdma`) — shared RDMA bring-up: open device, protection domain, completion queue, RC queue pair, memory region registration. Both producer and consumer need identical libibverbs setup, so it's factored out once rather than duplicated.
+- [`producer/`](producer) (`dtmshr-producer`) — DTMSHR node agent.
+- [`consumer/`](consumer) (`dtmshr-consumer`) — offload client.
+
+All RDMA access goes through `rdma-sys` (bindgen bindings over rdma-core / libibverbs). Linux only — see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for environment setup.
+
+## Current state
+
+Both `producer` and `consumer` independently:
+
+1. Open the first RDMA device on the host.
+2. Allocate a protection domain and completion queue.
+3. Create an RC (reliable connected) queue pair, transitioned to `INIT`.
+4. Register a placeholder memory region.
+
+Neither side talks to the other yet. Getting a queue pair from `INIT` to `RTR`/`RTS` needs the remote side's queue pair number, packet sequence number, and LID or GID — RDMA has no built-in discovery, so that exchange has to happen over some other channel (most likely a plain TCP handshake) before the RDMA path exists at all.
+
+## Open design questions
+
+- **Connection setup**: what carries the out-of-band exchange (qp_num/psn/gid/rkey)? Plain TCP socket is the obvious default.
+- **RDMA transport**: RoCEv2 vs. InfiniBand vs. iWARP vs. soft-RoCE (dev only, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
+- **SSI model**: process migration vs. remote exec vs. full VM — decides what "exposing a compute node" actually means on the wire.
+- **Discovery**: how a consumer finds/selects a producer (registry, broadcast, static config?).
+- **Trust/auth**: what stops an unauthenticated consumer from attaching to a producer's QP.
+- **Metering**: producer's "extra watts" budget, consumer's usage accounting.
+
+## Code conventions
+
+- `rdma-sys` is raw unsafe FFI (bindgen output, no safety wrapper upstream). Keep `unsafe` blocks narrow and confined to `rdma/src/lib.rs` — `producer` and `consumer` should only touch the safe wrapper types (`RdmaEndpoint`, `QueuePair`, `MemoryRegion`), never call `ibv_*` directly.
+- Every wrapper type owns its libibverbs handle and frees it in `Drop`, in reverse creation order (CQ/PD/context/device-list; QP; MR). Don't add manual cleanup calls in `main.rs` — let `Drop` handle it.
