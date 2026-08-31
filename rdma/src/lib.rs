@@ -12,6 +12,10 @@ use std::ptr;
 
 use rdma_sys::*;
 
+/// Port 1 is the common case for a single-port RDMA device. Revisit if
+/// multi-port devices ever matter here.
+pub const PORT_NUM: u8 = 1;
+
 /// One open RDMA device with a protection domain and completion queue.
 /// The base a producer or consumer builds queue pairs and memory regions on.
 pub struct RdmaEndpoint {
@@ -69,6 +73,21 @@ impl RdmaEndpoint {
                 pd,
                 cq,
             })
+        }
+    }
+}
+
+impl RdmaEndpoint {
+    /// GID at the given index on `PORT_NUM`. RoCE has no LID, so the GID is
+    /// what goes into the out-of-band exchange and the address handle.
+    pub fn gid(&self, index: i32) -> io::Result<[u8; 16]> {
+        unsafe {
+            let mut gid: ibv_gid = std::mem::zeroed();
+            let ret = ibv_query_gid(self.context, PORT_NUM, index, &mut gid);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+            Ok(gid.raw)
         }
     }
 }
@@ -134,6 +153,59 @@ impl QueuePair {
     pub fn qp_num(&self) -> u32 {
         unsafe { (*self.qp).qp_num }
     }
+
+    /// Drives this queue pair from `INIT` through `RTR` to `RTS` using the
+    /// remote side's connection info obtained via out-of-band exchange
+    /// (see `net::accept_and_exchange` / `net::connect_and_exchange`).
+    pub fn connect(&self, local_psn: u32, remote: &ConnectionInfo) -> io::Result<()> {
+        unsafe {
+            let mut attr: ibv_qp_attr = std::mem::zeroed();
+            attr.qp_state = IBV_QPS_RTR;
+            attr.path_mtu = IBV_MTU_1024;
+            attr.dest_qp_num = remote.qp_num;
+            attr.rq_psn = remote.psn;
+            attr.max_dest_rd_atomic = 1;
+            attr.min_rnr_timer = 12;
+            attr.ah_attr.is_global = 1;
+            attr.ah_attr.grh.dgid.raw = remote.gid;
+            attr.ah_attr.grh.sgid_index = 0;
+            attr.ah_attr.grh.hop_limit = 1;
+            attr.ah_attr.port_num = PORT_NUM;
+
+            let mask = IBV_QP_STATE
+                | IBV_QP_AV
+                | IBV_QP_PATH_MTU
+                | IBV_QP_DEST_QPN
+                | IBV_QP_RQ_PSN
+                | IBV_QP_MAX_DEST_RD_ATOMIC
+                | IBV_QP_MIN_RNR_TIMER;
+            let ret = ibv_modify_qp(self.qp, &mut attr, mask as i32);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+
+            let mut attr: ibv_qp_attr = std::mem::zeroed();
+            attr.qp_state = IBV_QPS_RTS;
+            attr.timeout = 14;
+            attr.retry_cnt = 7;
+            attr.rnr_retry = 7;
+            attr.sq_psn = local_psn;
+            attr.max_rd_atomic = 1;
+
+            let mask = IBV_QP_STATE
+                | IBV_QP_TIMEOUT
+                | IBV_QP_RETRY_CNT
+                | IBV_QP_RNR_RETRY
+                | IBV_QP_SQ_PSN
+                | IBV_QP_MAX_RD_ATOMIC;
+            let ret = ibv_modify_qp(self.qp, &mut attr, mask as i32);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+
+            Ok(())
+        }
+    }
 }
 
 impl Drop for QueuePair {
@@ -144,14 +216,19 @@ impl Drop for QueuePair {
     }
 }
 
-/// A registered, pinned memory region other side can RDMA read/write into,
-/// given the rkey.
+/// A registered, pinned memory region the other side can RDMA read/write
+/// into, given the rkey. Owns its backing buffer — `ibv_reg_mr` pins the
+/// address it's given, so that address must not move or be freed for as
+/// long as the registration is live. Field order matters: `mr` is declared
+/// before `buf` so `Drop` tears down in that order (deregister, then free).
 pub struct MemoryRegion {
     mr: *mut ibv_mr,
+    buf: Vec<u8>,
 }
 
 impl MemoryRegion {
-    pub fn register(endpoint: &RdmaEndpoint, buf: &mut [u8]) -> io::Result<Self> {
+    pub fn register(endpoint: &RdmaEndpoint, len: usize) -> io::Result<Self> {
+        let mut buf = vec![0u8; len];
         unsafe {
             let mr = ibv_reg_mr(
                 endpoint.pd,
@@ -162,8 +239,16 @@ impl MemoryRegion {
             if mr.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self { mr })
+            Ok(Self { mr, buf })
         }
+    }
+
+    pub fn addr(&self) -> u64 {
+        self.buf.as_ptr() as u64
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
     }
 
     pub fn rkey(&self) -> u32 {
@@ -180,5 +265,78 @@ impl Drop for MemoryRegion {
         unsafe {
             ibv_dereg_mr(self.mr);
         }
+    }
+}
+
+/// Everything the other side needs to connect to this node's queue pair and
+/// RDMA into its memory region. RDMA has no discovery of its own — this has
+/// to travel over some other channel first (see `net` below).
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionInfo {
+    pub qp_num: u32,
+    pub psn: u32,
+    pub gid: [u8; 16],
+    pub rkey: u32,
+    pub addr: u64,
+}
+
+pub const CONNECTION_INFO_LEN: usize = 4 + 4 + 16 + 4 + 8;
+
+impl ConnectionInfo {
+    pub fn to_bytes(&self) -> [u8; CONNECTION_INFO_LEN] {
+        let mut buf = [0u8; CONNECTION_INFO_LEN];
+        buf[0..4].copy_from_slice(&self.qp_num.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.psn.to_le_bytes());
+        buf[8..24].copy_from_slice(&self.gid);
+        buf[24..28].copy_from_slice(&self.rkey.to_le_bytes());
+        buf[28..36].copy_from_slice(&self.addr.to_le_bytes());
+        buf
+    }
+
+    pub fn from_bytes(buf: &[u8; CONNECTION_INFO_LEN]) -> Self {
+        Self {
+            qp_num: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            psn: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            gid: buf[8..24].try_into().unwrap(),
+            rkey: u32::from_le_bytes(buf[24..28].try_into().unwrap()),
+            addr: u64::from_le_bytes(buf[28..36].try_into().unwrap()),
+        }
+    }
+}
+
+/// Out-of-band `ConnectionInfo` exchange over plain TCP. Not RDMA itself —
+/// just the handshake that has to happen before RDMA can start. Whoever's
+/// meant to be the connection's "server" (currently: the producer) accepts;
+/// the other side dials in.
+pub mod net {
+    use super::{ConnectionInfo, CONNECTION_INFO_LEN};
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+
+    /// Accept one TCP connection and exchange connection info over it.
+    pub fn accept_and_exchange(
+        bind_addr: impl ToSocketAddrs,
+        local: &ConnectionInfo,
+    ) -> io::Result<ConnectionInfo> {
+        let listener = TcpListener::bind(bind_addr)?;
+        let (mut stream, peer) = listener.accept()?;
+        eprintln!("dtmshr-rdma: peer connected from {peer}");
+        exchange(&mut stream, local)
+    }
+
+    /// Dial out to a peer and exchange connection info over the connection.
+    pub fn connect_and_exchange(
+        peer_addr: impl ToSocketAddrs,
+        local: &ConnectionInfo,
+    ) -> io::Result<ConnectionInfo> {
+        let mut stream = TcpStream::connect(peer_addr)?;
+        exchange(&mut stream, local)
+    }
+
+    fn exchange(stream: &mut TcpStream, local: &ConnectionInfo) -> io::Result<ConnectionInfo> {
+        stream.write_all(&local.to_bytes())?;
+        let mut buf = [0u8; CONNECTION_INFO_LEN];
+        stream.read_exact(&mut buf)?;
+        Ok(ConnectionInfo::from_bytes(&buf))
     }
 }

@@ -31,19 +31,20 @@ All RDMA access goes through `rdma-sys` (bindgen bindings over rdma-core / libib
 
 ## Current state
 
-Both `producer` and `consumer` independently:
+Both `producer` and `consumer`:
 
 1. Open the first RDMA device on the host.
 2. Allocate a protection domain and completion queue.
 3. Create an RC (reliable connected) queue pair, transitioned to `INIT`.
-4. Register a placeholder memory region.
+4. Register a memory region (SSI buffer on the producer, offload staging buffer on the consumer).
+5. Exchange `ConnectionInfo` (qp_num, psn, GID, rkey, addr) over a plain TCP handshake — producer listens (`net::accept_and_exchange`), consumer dials in (`net::connect_and_exchange`).
+6. Drive the queue pair through `RTR` to `RTS` using the peer's info (`QueuePair::connect`), addressed by GID (RoCE has no LID).
 
-Neither side talks to the other yet. Getting a queue pair from `INIT` to `RTR`/`RTS` needs the remote side's queue pair number, packet sequence number, and LID or GID — RDMA has no built-in discovery, so that exchange has to happen over some other channel (most likely a plain TCP handshake) before the RDMA path exists at all.
+At that point both sides have a connected RC queue pair and each other's rkey/addr — but nothing sends or receives yet. Both binaries just park after connecting.
 
 ## Open design questions
 
-- **Connection setup**: what carries the out-of-band exchange (qp_num/psn/gid/rkey)? Plain TCP socket is the obvious default.
-- **RDMA transport**: RoCEv2 vs. InfiniBand vs. iWARP vs. soft-RoCE (dev only, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
+- **RDMA transport**: RoCEv2 vs. InfiniBand vs. iWARP vs. soft-RoCE (dev only, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). Current code assumes GID-based addressing (RoCE); pure InfiniBand would need LID-based `ah_attr` instead.
 - **SSI model**: process migration vs. remote exec vs. full VM — decides what "exposing a compute node" actually means on the wire.
 - **Discovery**: how a consumer finds/selects a producer (registry, broadcast, static config?).
 - **Trust/auth**: what stops an unauthenticated consumer from attaching to a producer's QP.

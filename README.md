@@ -28,4 +28,4 @@ Rust workspace, RDMA via `rdma-sys` (rdma-core / libibverbs bindings). Linux onl
 
 ## Status
 
-Early scaffold. Both sides open a device and bring up an RC queue pair + memory region locally. No connection handshake between them yet, no SSI exposure, no workload offload hook. Unverified against a real build — no Rust/Linux/libibverbs in the environment this was written in.
+Early scaffold. Both sides open a device, bring up an RC queue pair + memory region, exchange connection info over TCP, and connect the queue pair to RTS — then park. No SSI exposure yet, no workload offload hook. Unverified against a real build — no Rust/Linux/libibverbs in the environment this was written in.
