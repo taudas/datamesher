@@ -1,0 +1,47 @@
+name: Release
+
+# Builds release binaries and attaches them to a GitHub Release whenever a
+# version tag is pushed. Linux-only build (RDMA has no Windows/macOS
+# target here) -- see CONTRIBUTING.md.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rdma-core dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libibverbs-dev librdmacm-dev clang pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --verbose
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/dtmshr-producer dist/dtmshr-producer-linux-x86_64
+          cp target/release/dtmshr-consumer dist/dtmshr-consumer-linux-x86_64
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

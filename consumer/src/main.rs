@@ -45,7 +45,10 @@ fn run(producer_addr: &str) -> std::io::Result<()> {
         addr: mr.addr(),
     };
 
-    eprintln!("dtmshr-consumer: qp_num={} rkey={} connecting to {producer_addr}", local.qp_num, local.rkey);
+    eprintln!(
+        "dtmshr-consumer: qp_num={} rkey={} connecting to {producer_addr}",
+        local.qp_num, local.rkey
+    );
 
     let remote = net::connect_and_exchange(producer_addr, &local)?;
     qp.connect(LOCAL_PSN, &remote)?;

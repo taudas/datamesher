@@ -35,6 +35,16 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md), specifically "Code conventions". Short 
 
 Small, focused commits. Message: what changed, then why (not what-and-how restated). No `--no-verify`, no force-push to `master`.
 
+## CI/CD
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push/PR to `master`: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo build --workspace`, `cargo test --workspace`. All four pass clean as of this writing — keep it that way; run them locally before pushing:
+
+```bash
+cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds release binaries and attaches them to a GitHub Release whenever a `v*.*.*` tag is pushed (`git tag v0.1.0 && git push origin v0.1.0`). Linux x86_64 only, no other targets make sense for this project.
+
 ## Status
 
 Everything here is early scaffold — see [ARCHITECTURE.md](ARCHITECTURE.md#current-state) for exactly what works today. `cargo build --workspace` is verified clean on WSL2 Ubuntu 24.04 + rdma-core 61.0. None of it has run against a real device or soft-RoCE yet; if you're the first to do that, expect some runtime surprises and please report back.

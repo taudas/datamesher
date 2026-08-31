@@ -20,7 +20,9 @@ const SSI_BUFFER_LEN: usize = 4096;
 const RECV_BUFFER_LEN: usize = 256;
 
 fn main() -> std::io::Result<()> {
-    let bind_addr = env::args().nth(1).unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
+    let bind_addr = env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
 
     let endpoint = RdmaEndpoint::open_first_device(CQ_DEPTH)?;
     let qp = QueuePair::create_rc(&endpoint, QP_DEPTH, QP_DEPTH)?;
@@ -35,7 +37,10 @@ fn main() -> std::io::Result<()> {
         addr: mr.addr(),
     };
 
-    eprintln!("dtmshr-producer: qp_num={} rkey={} listening on {bind_addr}", local.qp_num, local.rkey);
+    eprintln!(
+        "dtmshr-producer: qp_num={} rkey={} listening on {bind_addr}",
+        local.qp_num, local.rkey
+    );
 
     let remote = net::accept_and_exchange(&bind_addr, &local)?;
     qp.connect(LOCAL_PSN, &remote)?;
@@ -62,7 +67,10 @@ fn main() -> std::io::Result<()> {
 
         for wc in completions {
             if wc.status != 0 {
-                eprintln!("dtmshr-producer: work completion failed, status={}", wc.status);
+                eprintln!(
+                    "dtmshr-producer: work completion failed, status={}",
+                    wc.status
+                );
                 continue;
             }
             let raw = &recv_mr.as_slice()[..wc.byte_len as usize];

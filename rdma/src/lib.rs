@@ -103,13 +103,15 @@ impl RdmaEndpoint {
         unsafe {
             // ibv_wc isn't Clone/Copy (rdma-sys defines it by hand, see
             // vendor/rdma-sys/src/types.rs), so `vec![zeroed(); max]` won't
-            // work. set_len is fine here: ibv_poll_cq fills entries [0, n),
-            // and we only ever read that prefix back out.
+            // work — push each element instead, so the buffer is genuinely
+            // initialized rather than just claimed via set_len.
             let mut wc_buf: Vec<ibv_wc> = Vec::with_capacity(max);
-            wc_buf.set_len(max);
+            for _ in 0..max {
+                wc_buf.push(std::mem::zeroed());
+            }
             let n = ibv_poll_cq(self.cq, max as i32, wc_buf.as_mut_ptr());
             if n < 0 {
-                return Err(io::Error::new(io::ErrorKind::Other, "ibv_poll_cq failed"));
+                return Err(io::Error::other("ibv_poll_cq failed"));
             }
             Ok(wc_buf[..n as usize]
                 .iter()
@@ -162,7 +164,11 @@ pub struct QueuePair {
 }
 
 impl QueuePair {
-    pub fn create_rc(endpoint: &RdmaEndpoint, max_send_wr: u32, max_recv_wr: u32) -> io::Result<Self> {
+    pub fn create_rc(
+        endpoint: &RdmaEndpoint,
+        max_send_wr: u32,
+        max_recv_wr: u32,
+    ) -> io::Result<Self> {
         unsafe {
             let mut qp_init_attr: ibv_qp_init_attr = std::mem::zeroed();
             qp_init_attr.send_cq = endpoint.cq;
@@ -347,6 +353,10 @@ impl MemoryRegion {
 
     pub fn len(&self) -> usize {
         self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 
     /// Reads the buffer's current contents locally — for the two-sided

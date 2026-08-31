@@ -1,5 +1,7 @@
 # Datamesher
 
+[![CI](https://github.com/taudas/datamesher/actions/workflows/ci.yml/badge.svg)](https://github.com/taudas/datamesher/actions/workflows/ci.yml)
+
 Distributed compute mesh. Spare CPU cycles from producers, offloaded to consumers, over RDMA.
 
 Reference: [Datamesher.ai](http://datamesher.ai)
