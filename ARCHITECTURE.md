@@ -40,16 +40,23 @@ Both `producer` and `consumer`:
 5. Exchange `ConnectionInfo` (qp_num, psn, GID, rkey, addr) over a plain TCP handshake — producer listens (`net::accept_and_exchange`), consumer dials in (`net::connect_and_exchange`).
 6. Drive the queue pair through `RTR` to `RTS` using the peer's info (`QueuePair::connect`), addressed by GID (RoCE has no LID).
 
-At that point both sides have a connected RC queue pair and each other's rkey/addr. The producer posts a receive buffer and polls its completion queue in a loop, logging whatever lands on it. The consumer sends a `"ping {n}"` message every 5 seconds (`QueuePair::post_send`) and drains its own completion queue so it doesn't overflow. This is a heartbeat, not a request/response protocol, and not the SSI data path (which will likely be one-sided RDMA read/write, not send/receive).
+At that point both sides have a connected RC queue pair and each other's rkey/addr, and run a small job/RPC protocol on top (`rdma::job`):
 
-The whole workspace compiles clean (`cargo build --workspace`) on WSL2 Ubuntu 24.04 with rdma-core 61.0. Not yet run against a real device or soft-RoCE — that WSL2 kernel doesn't ship `rdma_rxe` (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), so everything above is verified at the type/FFI level (every `ibv_*` call, struct field, and constified/bitfield enum reference matches what rdma-core 61.0's headers actually generate), not at the "does a QP actually reach RTS on real hardware" level.
+1. Consumer builds a `JobRequest` (opcode + inline input + its own result buffer's addr/rkey) and sends it two-sided (`QueuePair::post_send`).
+2. Producer receives it, runs `job::execute` (currently one opcode: uppercase the input — a placeholder job picked to prove the round trip without opening the arbitrary-code-execution/sandboxing question a real job type would raise), and RDMA WRITEs the result straight into the consumer's named buffer (`QueuePair::post_rdma_write`) — one-sided, the consumer's CPU does nothing for this step.
+3. A plain RDMA WRITE doesn't tell the receiver it landed, so the producer follows up with a two-sided `JobDone { job_id }` notice. The consumer, waiting on that, then reads its own result buffer locally.
+
+This is remote-exec-as-a-service, explicitly **not** SSI (see below) — it's the concrete first answer to "what does offload mean on the wire," scoped down from the harder single-system-image framing in the project's original pitch.
+
+The whole workspace compiles clean (`cargo build --workspace`) on WSL2 Ubuntu 24.04 with rdma-core 61.0, and `rdma::job`'s encode/decode/execute logic has real unit tests (`cargo test --workspace`, no hardware needed — it's pure data). Not yet run against a real device or soft-RoCE — that WSL2 kernel doesn't ship `rdma_rxe` (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)), so the RDMA calls themselves are verified at the type/FFI level (every `ibv_*` call, struct field, and constified/bitfield enum reference matches what rdma-core 61.0's headers actually generate), not at the "does a QP actually reach RTS and carry a job on real hardware" level.
 
 ## Open design questions
 
 - **RDMA transport**: RoCEv2 vs. InfiniBand vs. iWARP vs. soft-RoCE (dev only, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)). Current code assumes GID-based addressing (RoCE); pure InfiniBand would need LID-based `ah_attr` instead.
-- **SSI model**: process migration vs. remote exec vs. full VM — decides what "exposing a compute node" actually means on the wire.
+- **Real job execution**: the job/RPC model above is scoped to one safe placeholder opcode. A real job type means deciding what code actually gets to run on the producer, and how it's sandboxed/resource-limited — this is a security question as much as a design one.
+- **SSI model**: is "single system image" (process migration, full VM) ever actually pursued, or does the project settle on job/RPC as the permanent model? Left open; job/RPC is what's built.
 - **Discovery**: how a consumer finds/selects a producer (registry, broadcast, static config?).
-- **Trust/auth**: what stops an unauthenticated consumer from attaching to a producer's QP.
+- **Trust/auth**: what stops an unauthenticated consumer from attaching to a producer's QP, or submitting jobs it shouldn't be able to run.
 - **Metering**: producer's "extra watts" budget, consumer's usage accounting.
 
 ## Code conventions

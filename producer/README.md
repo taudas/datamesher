@@ -4,7 +4,7 @@ RDMA server exposing a single system image compute node to consumers.
 
 Rust. RDMA bring-up lives in the shared [`../rdma`](../rdma) crate (`dtmshr-rdma`), built on `rdma-sys` (bindgen bindings over rdma-core / libibverbs).
 
-Current: opens first RDMA device, brings up an RC queue pair and memory region, listens on TCP for a consumer's `ConnectionInfo`, exchanges its own, and connects the queue pair through to RTS. Then posts a receive buffer and polls its completion queue in a loop, logging any two-sided message that lands on it. That's a control channel, not SSI exposure — no request/response protocol yet, and the consumer doesn't send anything yet either. See TODOs in `src/main.rs`.
+Current: opens first RDMA device, brings up an RC queue pair and memory region, listens on TCP for a consumer's `ConnectionInfo`, exchanges its own, and connects the queue pair through to RTS. Then serves the [`rdma::job`](../rdma/src/job.rs) protocol: receives a `JobRequest`, executes it, RDMA WRITEs the result into the buffer the consumer named, and sends a `JobDone` notice. That's remote-exec-as-a-service (one placeholder opcode: uppercase), not real SSI compute exposure — see [ARCHITECTURE.md](../ARCHITECTURE.md#open-design-questions).
 
 ## Build
 

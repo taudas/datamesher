@@ -4,7 +4,7 @@ Runs on the consumer's existing machine. Offloads CPU-bound work from existing s
 
 Rust. RDMA bring-up lives in the shared [`../rdma`](../rdma) crate (`dtmshr-rdma`), built on `rdma-sys` (bindgen bindings over rdma-core / libibverbs).
 
-Current: mirrors the producer's bring-up, then dials the producer's TCP address, exchanges `ConnectionInfo`, and connects the queue pair through to RTS. Then sends a `"ping {n}"` heartbeat every 5s (two-sided send, matching the producer's receive loop). That's a traffic smoke test, not the offload path — no producer discovery, no workload hook yet. See TODOs in `src/main.rs`.
+Current: mirrors the producer's bring-up, then dials the producer's TCP address, exchanges `ConnectionInfo`, and connects the queue pair through to RTS. Then submits an [`rdma::job`](../rdma/src/job.rs) every 5s (sample text, uppercased by the producer), waits for the `JobDone` notice, and reads the result back from its own RDMA-writable buffer. That's remote-exec-as-a-service, not the real offload path — no producer discovery, no workload interception hook yet. See [ARCHITECTURE.md](../ARCHITECTURE.md#open-design-questions).
 
 ## Build
 

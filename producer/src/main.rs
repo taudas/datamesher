@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use dtmshr_rdma::{net, ConnectionInfo, MemoryRegion, QueuePair, RdmaEndpoint};
+use dtmshr_rdma::{ibv_wc_opcode, job, net, ConnectionInfo, MemoryRegion, QueuePair, RdmaEndpoint};
 
 const CQ_DEPTH: i32 = 16;
 const QP_DEPTH: u32 = 16;
@@ -10,14 +10,18 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:7471";
 const POLL_IDLE_SLEEP: Duration = Duration::from_millis(50);
 
 /// Placeholder for the memory this producer exposes as its SSI compute
-/// surface. Real sizing/lifetime TBD once the SSI model is decided.
+/// surface. Real sizing/lifetime TBD once the SSI model is decided. Unused
+/// by the job protocol below -- that's a separate, narrower thing.
 const SSI_BUFFER_LEN: usize = 4096;
 
-/// A single control-channel message buffer. Not the SSI data path — this
-/// is just enough two-sided send/receive to prove the connected queue pair
-/// actually carries traffic, before any real request/response protocol
-/// exists.
-const RECV_BUFFER_LEN: usize = 256;
+/// Largest job input/result this producer will handle. Fixed and tiny —
+/// this is a protocol smoke test, not a real workload's sizing.
+const MAX_JOB_LEN: usize = 64;
+const REQUEST_BUFFER_LEN: usize = job::HEADER_LEN + MAX_JOB_LEN;
+
+/// wr_id for post_recv/post_send calls where the id carries no meaning of
+/// its own (unlike the RDMA WRITE below, where wr_id *is* the job_id).
+const OPAQUE_WR_ID: u64 = 0;
 
 fn main() -> std::io::Result<()> {
     let bind_addr = env::args()
@@ -50,14 +54,19 @@ fn main() -> std::io::Result<()> {
         remote.qp_num, remote.rkey
     );
 
-    // TODO: this is just a control-channel receive loop, proving traffic
-    // flows over the connected QP. Real SSI compute exposure (what a
-    // "request" even means) is still unbuilt.
-    let recv_mr = MemoryRegion::register(&endpoint, RECV_BUFFER_LEN)?;
-    qp.post_recv(&recv_mr, 0)?;
-    eprintln!("dtmshr-producer: control channel up, waiting for messages");
+    // Job/RPC channel: consumer sends a JobRequest, we execute it and RDMA
+    // WRITE the result into the buffer it named, then send a JobDone
+    // notice (a plain RDMA WRITE doesn't tell the receiver it landed).
+    let request_mr = MemoryRegion::register(&endpoint, REQUEST_BUFFER_LEN)?;
+    qp.post_recv(&request_mr, OPAQUE_WR_ID)?;
 
-    let mut next_wr_id = 1u64;
+    // Reused across jobs -- overwritten before every RDMA WRITE, sized to
+    // match the consumer's result buffer (see consumer/src/main.rs).
+    let mut result_scratch = MemoryRegion::register(&endpoint, MAX_JOB_LEN)?;
+    let mut notify_mr = MemoryRegion::register(&endpoint, job::DONE_LEN)?;
+
+    eprintln!("dtmshr-producer: ready to serve jobs");
+
     loop {
         let completions = endpoint.poll_cq(QP_DEPTH as usize)?;
         if completions.is_empty() {
@@ -73,13 +82,39 @@ fn main() -> std::io::Result<()> {
                 );
                 continue;
             }
-            let raw = &recv_mr.as_slice()[..wc.byte_len as usize];
-            let msg = String::from_utf8_lossy(raw);
-            let msg = msg.trim_end_matches('\0');
-            eprintln!("dtmshr-producer: received {} bytes: {msg:?}", wc.byte_len);
 
-            qp.post_recv(&recv_mr, next_wr_id)?;
-            next_wr_id += 1;
+            if wc.opcode == ibv_wc_opcode::IBV_WC_RECV {
+                let raw = &request_mr.as_slice()[..wc.byte_len as usize];
+                match job::JobRequest::decode(raw) {
+                    Ok((request, input)) => match job::execute(request.opcode, input) {
+                        Ok(result) => {
+                            result_scratch.as_mut_slice()[..result.len()].copy_from_slice(&result);
+                            qp.post_rdma_write(
+                                &result_scratch,
+                                request.result_addr,
+                                request.result_rkey,
+                                request.job_id,
+                            )?;
+                            eprintln!(
+                                "dtmshr-producer: job {} executed ({} -> {} bytes), RDMA WRITE posted",
+                                request.job_id,
+                                input.len(),
+                                result.len()
+                            );
+                        }
+                        Err(e) => eprintln!("dtmshr-producer: job {} failed: {e}", request.job_id),
+                    },
+                    Err(e) => eprintln!("dtmshr-producer: bad job request: {e}"),
+                }
+                qp.post_recv(&request_mr, OPAQUE_WR_ID)?;
+            } else if wc.opcode == ibv_wc_opcode::IBV_WC_RDMA_WRITE {
+                // wr_id was set to the job_id in post_rdma_write above.
+                let job_id = wc.wr_id;
+                job::JobDone { job_id }.encode(notify_mr.as_mut_slice())?;
+                qp.post_send(&notify_mr, OPAQUE_WR_ID)?;
+                eprintln!("dtmshr-producer: job {job_id} result delivered, notified consumer");
+            }
+            // IBV_WC_SEND (the notify itself completing): nothing to do.
         }
     }
 }

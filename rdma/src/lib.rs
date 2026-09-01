@@ -18,6 +18,13 @@ use std::ptr;
 
 use rdma_sys::*;
 
+pub mod job;
+
+/// `WorkCompletion::opcode` is one of these — `ibv_wc_opcode` is a bindgen
+/// `constified_enum_module` re-exported here so callers dispatching on
+/// completion type don't need to depend on `rdma_sys` directly.
+pub use rdma_sys::ibv_wc_opcode;
+
 /// Port 1 is the common case for a single-port RDMA device. Revisit if
 /// multi-port devices ever matter here.
 pub const PORT_NUM: u8 = 1;
@@ -301,6 +308,43 @@ impl QueuePair {
             wr.num_sge = 1;
             wr.opcode = ibv_wr_opcode::IBV_WR_SEND;
             wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+
+            let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
+            let ret = ibv_post_send(self.qp, &mut wr, &mut bad_wr);
+            if ret != 0 {
+                return Err(io::Error::from_raw_os_error(ret));
+            }
+            Ok(())
+        }
+    }
+
+    /// One-sided RDMA WRITE of the whole local memory region into
+    /// `remote_addr`/`remote_rkey` on the peer — no action needed on the
+    /// peer's side, that's the point of RDMA. The peer isn't notified when
+    /// this lands; pair it with a `post_send` if it needs to know.
+    pub fn post_rdma_write(
+        &self,
+        local_mr: &MemoryRegion,
+        remote_addr: u64,
+        remote_rkey: u32,
+        wr_id: u64,
+    ) -> io::Result<()> {
+        unsafe {
+            let mut sge = ibv_sge {
+                addr: local_mr.addr(),
+                length: local_mr.len() as u32,
+                lkey: local_mr.lkey(),
+            };
+            let mut wr: ibv_send_wr = std::mem::zeroed();
+            wr.wr_id = wr_id;
+            wr.sg_list = &mut sge;
+            wr.num_sge = 1;
+            wr.opcode = ibv_wr_opcode::IBV_WR_RDMA_WRITE;
+            wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+            wr.wr.rdma = rdma_t {
+                remote_addr,
+                rkey: remote_rkey,
+            };
 
             let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
             let ret = ibv_post_send(self.qp, &mut wr, &mut bad_wr);
